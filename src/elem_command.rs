@@ -7,20 +7,33 @@ use std::ffi::CString;
 use std::process;
 
 use nix::unistd::ForkResult;
-use nix::sys::wait;
 use std::env;             //追加
-use std::path::Path;      //追加
+use std::path::Path;
+use nix::errno::Errno;
 
 pub struct Command {
-    text: String,
+    _text: String,
     args: Vec<String>,
     cargs: Vec<CString>,
 }
 
 impl Command {
-    pub fn exec(&mut self, _core: &mut ShellCore) {
-        if self.text == "exit\n" { //self.args[0]を使ってもよい
-            process::exit(0);
+    pub fn exec(&mut self, core: &mut ShellCore) {
+        if self.args[0] == "exit" {
+            eprintln!("exit");
+            if self.args.len() > 1 {
+                core.vars.insert("?".to_string(), self.args[1].clone());
+            }
+
+            let exit_status = match core.vars["?"].parse::<i32>() {
+                Ok(n) => n % 256,
+                Err(_) => {
+                    println!("sush: exit: {}: numeric argument required", core.vars["?"]);
+                    2
+                },
+            };
+
+            process::exit(exit_status);
         }
         if self.args[0] == "cd" && self.args.len() > 1 {
             let path = Path::new(&self.args[1]);
@@ -32,12 +45,24 @@ impl Command {
 
         match unsafe{unistd::fork()} {
             Ok(ForkResult::Child) => {
-                let err = unistd::execvp(&self.cargs[0], &self.cargs);
-                println!("Failed to execute. {:?}", err);
-                process::exit(127);
+                match unistd::execvp(&self.cargs[0], &self.cargs) {
+                    Err(Errno::EACCES) => {
+                        println!("sush: {}: Permission denied", &self.args[0]);
+                        process::exit(126);
+                    },
+                    Err(Errno::ENOENT) => {
+                        println!("{}: command not found", &self.args[0]);
+                        process::exit(127);
+                    },
+                    Err(err) => {
+                        println!("Failed to execute. {:?}", err);
+                        process::exit(127);
+                    },
+                    _ => ()
+                }
             },
             Ok(ForkResult::Parent { child } ) => {
-                let _ = wait::waitpid(child, None);
+                core.wait_process(child)
             },
             Err(err) => panic!("Failed to fork. {}", err),
         }
@@ -57,7 +82,7 @@ impl Command {
             .collect();
 
         if args.len() > 0 { // 1個以上の単語があればCommandのインスタンスを作成して返す
-            Some( Command {text: line, args: args, cargs: cargs} )
+            Some( Command {_text: line, args, cargs } )
         }else{
             None // そうでなければ何も返さない
         }
